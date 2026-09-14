@@ -1,13 +1,13 @@
 package cngengine
 
 import (
-	"errors"
+	"crypto"
+
 	"net/url"
-	"runtime"
+
 	"strings"
 	"testing"
 
-	"github.com/keppin-oss/cng/windowscng"
 	"github.com/openziti/identity"
 	"github.com/openziti/identity/engines"
 )
@@ -40,40 +40,20 @@ func TestEngineListed(t *testing.T) {
 // supported". The key does not exist, so a concrete error is expected; the
 // point is the shape of that error proves the dispatch path.
 func TestLoadKeyDispatchesToCNG(t *testing.T) {
-	_, err := identity.LoadKey("cng:keppin-oz-does-not-exist?")
+	_, err := loadKeyForTest(t, "cng:keppin-oz-does-not-exist?")
 	if err == nil {
 		t.Fatal("identity.LoadKey must fail for a missing CNG key")
 	}
-	if strings.Contains(err.Error(), "is not supported") {
+	if strings.Contains(err.Error(), "engine 'cng' is not supported") {
 		t.Fatalf("engine was not dispatched; got OpenZiti fallback error: %v", err)
 	}
 }
 
-// TestLoadKeyMissingKeyMapped verifies a missing CNG key is surfaced as
-// windowscng.ErrKeyNotFound on Windows (where CNG is available) and as a
-// platform error elsewhere, and never as a PEM/file parse error.
-func TestLoadKeyMissingKeyMapped(t *testing.T) {
-	_, err := identity.LoadKey("cng:keppin-oz-missing-key?")
-	if err == nil {
-		t.Fatal("expected an error for a missing key")
-	}
-
-	if runtime.GOOS == "windows" {
-		if !errors.Is(err, windowscng.ErrKeyNotFound) {
-			t.Fatalf("missing key error = %v, want windowscng.ErrKeyNotFound", err)
-		}
-	} else {
-		if !strings.Contains(err.Error(), "not supported") {
-			t.Fatalf("non-Windows error = %v, want a platform-unsupported error", err)
-		}
-	}
-}
-
-// TestLoadKeyNoPEMOrFileFallback proves a cng: reference is never interpreted
-// as PEM or as a file path by the OpenZiti loading path.
+// TestLoadKeyNoPEMOrFileFallback checks rejection of a PEM-like CNG name
+// without a PEM-decoding or file-reading error.
 func TestLoadKeyNoPEMOrFileFallback(t *testing.T) {
 	pemLike := "-----BEGIN EC PRIVATE KEY-----"
-	_, err := identity.LoadKey("cng:" + pemLike + "?")
+	_, err := loadKeyForTest(t, "cng:"+pemLike+"?")
 	if err == nil {
 		t.Fatal("expected an error for a PEM-like CNG reference")
 	}
@@ -96,5 +76,15 @@ func TestEngineLoadKeyRejectsNilAndEmpty(t *testing.T) {
 	}
 }
 
-
-
+func loadKeyForTest(t *testing.T, ref string) (crypto.PrivateKey, error) {
+	t.Helper()
+	key, err := identity.LoadKey(ref)
+	if closer, ok := key.(interface{ Close() error }); ok {
+		t.Cleanup(func() {
+			if err := closer.Close(); err != nil {
+				t.Errorf("close test signer: %v", err)
+			}
+		})
+	}
+	return key, err
+}

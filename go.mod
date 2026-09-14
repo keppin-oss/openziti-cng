@@ -49,7 +49,7 @@ require (
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/kataras/go-events v0.0.3 // indirect
-	github.com/keppin-oss/cng v0.1.1
+	github.com/keppin-oss/cng v0.1.2
 	github.com/lufia/plan9stats v0.0.0-20260330125221-c963978e514e // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect

@@ -20,13 +20,9 @@ func TestKeyReference(t *testing.T) {
 	}
 }
 
-func TestKeyReferenceTrims(t *testing.T) {
-	got, err := KeyReference("  keppin-oz-001  ")
-	if err != nil {
-		t.Fatalf("KeyReference: %v", err)
-	}
-	if got != "cng:keppin-oz-001?" {
-		t.Fatalf("KeyReference = %q, want %q", got, "cng:keppin-oz-001?")
+func TestKeyReferenceRejectsWhitespace(t *testing.T) {
+	if _, err := KeyReference(" name "); err == nil {
+		t.Fatal("ambiguous whitespace accepted")
 	}
 }
 
@@ -90,5 +86,14 @@ func TestEngineRegistered(t *testing.T) {
 	}
 }
 
-
-
+func TestEnrollRejectsMalformedTokenSafely(t *testing.T) {
+	_, err := Enroll("PRIVATE_TOKEN.invalid", "Test")
+	if err == nil || strings.Contains(err.Error(), "PRIVATE_TOKEN") {
+		t.Fatal("malformed token not handled safely")
+	}
+}
+func TestCertMatchesSignerRejectsNil(t *testing.T) {
+	if _, err := CertMatchesSigner(nil, "Test"); err == nil {
+		t.Fatal("nil configuration accepted")
+	}
+}

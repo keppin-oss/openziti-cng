@@ -1,62 +1,54 @@
-// Command loadidentity loads an OpenZiti identity configuration file, confirms
-// that its key reference is a CNG reference (not a PEM/file key), and re-resolves
-// the CNG-backed crypto.Signer from that reference through OpenZiti's identity
-// loading path. No private-key material is exported at any point.
-//
-// The configuration is produced by enrollment (see examples/enroll) or any other
-// OpenZiti identity configuration whose "id.key" is "cng:<name>?".
-//
-// The example runs on Windows. On non-Windows platforms identity.LoadKey
-// returns a platform-unsupported error.
+// Command loadidentity accepts only canonical CNG identity references.
 package main
 
 import (
 	"crypto"
 	"flag"
 	"fmt"
-	"log"
-
+	_ "github.com/keppin-oss/openziti-cng/cngengine"
+	"github.com/keppin-oss/openziti-cng/internal/diagnostic"
+	"github.com/keppin-oss/openziti-cng/internal/keyref"
 	"github.com/openziti/identity"
 	"github.com/openziti/sdk-golang/v2/ziti"
-
-	// Register the "cng" engine with OpenZiti's identity package. The blank
-	// import is the only activation step required from a consumer.
-	_ "github.com/keppin-oss/openziti-cng/cngengine"
+	"io"
+	"log"
+	"os"
 )
 
-func main() {
-	conf := flag.String("config", "", "path to an OpenZiti identity JSON configuration")
-	flag.Parse()
-
-	if *conf == "" {
-		log.Fatal("-config is required")
-	}
-
-	cfg, err := ziti.NewConfigFromFile(*conf)
+func run(path string, output io.Writer) (resultErr error) {
+	cfg, err := ziti.NewConfigFromFile(path)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		return diagnostic.Safe("load configuration", err)
 	}
-
-	if cfg.ID.Key == "" {
-		log.Fatal("configuration has no identity key reference")
+	if _, err := keyref.Parse(cfg.ID.Key); err != nil {
+		return err
 	}
-
 	priv, err := identity.LoadKey(cfg.ID.Key)
 	if err != nil {
-		log.Fatalf("identity.LoadKey(%q): %v", cfg.ID.Key, err)
+		return diagnostic.Safe("open CNG identity key", err)
 	}
-
-	signer, ok := priv.(crypto.Signer)
-	if !ok {
-		log.Fatalf("identity.LoadKey returned %T, want crypto.Signer", priv)
-	}
-
 	if closer, ok := priv.(interface{ Close() error }); ok {
-		defer func() { _ = closer.Close() }()
+		defer func() {
+			if err := closer.Close(); err != nil {
+				resultErr = diagnostic.Safe("close CNG identity key", err)
+			}
+		}()
 	}
-
-	fmt.Printf("resolved CNG-backed signer from key reference %q (public key %T)\n", cfg.ID.Key, signer.Public())
+	if _, ok := priv.(crypto.Signer); !ok {
+		return fmt.Errorf("CNG engine did not return a signer")
+	}
+	// Never print the arbitrary identity key field, even after validation.
+	_, err = fmt.Fprintln(output, "resolved CNG-backed signer")
+	return err
 }
 
-
-
+func main() {
+	path := flag.String("config", "", "path to an OpenZiti identity JSON configuration")
+	flag.Parse()
+	if *path == "" {
+		log.Fatal("-config is required")
+	}
+	if err := run(*path, os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+}

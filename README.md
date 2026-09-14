@@ -1,120 +1,104 @@
 # Keppin-OSS OpenZiti-CNG
 
-A consumer-facing engine adapter that lets OpenZiti identities use a
-machine-scoped, non-exportable Windows CNG/KSP private key owned by
-[Keppin-OSS CNG](https://github.com/keppin-oss/cng).
+An OpenZiti identity engine adapter for existing machine-scoped Windows CNG
+keys in the Microsoft Software Key Storage Provider.
 
-## Purpose
+## Dependencies
 
-OpenZiti identities normally reference a private key as PEM text or a file
-path. This module adds a third scheme, `cng:<name>?`, that resolves to an
-existing machine-scoped, non-exportable key in the Microsoft Software Key
-Storage Provider (CNG/KSP).
+- Go 1.26.5
+- github.com/keppin-oss/cng **v0.1.2**
+- github.com/openziti/identity **v1.0.140**
+- github.com/openziti/sdk-golang/v2 **v2.0.0-pre4**
 
-**Core guarantee:** the permanent private key stays CNG/KSP-backed and
-non-exportable. It is never exported, copied, or persisted as PEM, and it never
-leaves the CNG/KSP provider. This module only adapts OpenZiti's identity engine
-interface to Keppin-OSS CNG; it does not reimplement OpenZiti's OTT/CSR/
-Controller protocol.
+The engine registers on every platform. Key access requires Windows; other
+platforms return the CNG platform-not-supported error.
 
-## Requirements
+## Activation and API
 
-- **OS**: Windows only. The `cng` engine registers on every platform so code
-  compiles everywhere, but key access requires Windows CNG/KSP and returns a
-  platform-unsupported error elsewhere.
-- **Privilege**: creating/deleting a machine-scoped key requires an elevated
-  (Administrator) process. Opening/signing an existing key is governed by the
-  key's DACL.
-- **Go**: `1.26.5` (see `go.mod`).
-
-### Dependencies (resolved)
-
-| Module | Version | Role |
-| --- | --- | --- |
-| `github.com/openziti/identity` | `v1.0.140` | engine registry + `identity.LoadKey` |
-| `github.com/openziti/sdk-golang/v2` | `v2.0.0-pre4` | native `enroll.Enroll` entry point |
-| `github.com/keppin-oss/cng` | `v0.1.1` | `windowscng` CNG/KSP mechanics |
-
-## Install / import
-
-Blank-import the engine package to register it (the only activation step):
+Consumers must register the engine, including when using enrollment helpers:
 
 ```go
-import _ "github.com/keppin-oss/openziti-cng/cngengine"
+import (
+    _ "github.com/keppin-oss/openziti-cng/cngengine"
+    "github.com/keppin-oss/openziti-cng/enrollcng"
+)
 ```
 
-For native OTT enrollment, import the helper normally:
-
-```go
-import "github.com/keppin-oss/openziti-cng/enrollcng"
-```
-
-No configuration or further setup is required.
+- `enrollcng.KeyReference(name)` constructs a validated reference.
+- `enrollcng.BuildFlags(jwt, claims, name)` wires SDK flags without network access.
+  Callers using these flags directly own SDK error handling and diagnostics.
+- `enrollcng.Enroll(jwt, name)` validates the token and delegates OTT enrollment.
+  It returns safe stage/category errors instead of raw SDK diagnostics.
+- `enrollcng.CertMatchesSigner(cfg, name)` compares the leaf certificate public
+  key with the CNG signer. It does not verify certificate trust or prove CSR provenance.
 
 ## Key reference
 
-Canonical form:
+Canonical form: `cng:<container-name>?`.
 
-```text
-cng:<container-name>?
-```
+Names follow `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. Names are exact and are never
+trimmed or decoded. Whitespace, slashes, colons, percent escapes, Unicode,
+query values, fragments and other ambiguous forms are rejected.
 
-- `cng` is the engine id (the URL scheme).
-- `<container-name>` is the exact CNG container/key name; it carries only the
-  container identity, never key bytes.
-- The trailing `?` is a compatibility workaround required by
-  `github.com/openziti/identity v1.0.140` on Windows (see
-  [docs/README.md](docs/README.md)). Use `enrollcng.KeyReference` or
-  `enrollcng.Enroll` to construct it; do not re-derive it by hand.
-
-Container names must not be empty or contain `?` or `:` (`KeyReference`
-rejects both).
-
-## Packages / API
-
-### `cngengine`
-
-- `EngineId` (`"cng"`) — engine id and reference scheme.
-- `init()` — registers the engine via `engines.RegisterEngine`.
-- `LoadKey(*url.URL) (crypto.PrivateKey, error)` — opens the referenced key with
-  `windowscng.Open` and returns the `windowscng.Signer` (a `crypto.Signer`)
-  directly. The returned key also satisfies `interface{ Close() error }`.
-
-### `enrollcng`
-
-- `KeyReference(name) (string, error)` — builds `cng:<name>?`.
-- `BuildFlags(jwt, claims, name) (enroll.EnrollmentFlags, error)` — wires the
-  reference into enrollment flags (no network).
-- `Enroll(jwt, name) (*ziti.Config, error)` — parses the OTT token with
-  `enroll.ParseToken`, then delegates to `enroll.Enroll`.
-- `CertMatchesSigner(cfg, name) (bool, error)` — proves the enrolled certificate
-  matches the CNG key.
+The trailing `?` remains required by the pinned OpenZiti identity Windows
+parser. Always construct references using `KeyReference`. An arbitrary direct
+call to upstream `identity.LoadKey` can still panic on a missing delimiter.
+See [technical details](docs/README.md).
 
 ## Examples
 
-| Example | Demonstrates |
-| --- | --- |
-| [examples/signverify/main.go](examples/signverify/main.go) | load a CNG key via `identity.LoadKey`, sign/verify as `crypto.Signer` |
-| [examples/enroll/main.go](examples/enroll/main.go) | native OTT enrollment + `CertMatchesSigner` |
-| [examples/loadidentity/main.go](examples/loadidentity/main.go) | re-resolve a `cng:` reference from an identity config |
+- [signverify](examples/signverify/main.go): sign and verify using an existing key.
+- [enroll](examples/enroll/main.go): enroll and save a new identity JSON file.
+- [loadidentity](examples/loadidentity/main.go): accept only a canonical CNG
+  reference, load its signer, and print a status without the identity key field.
 
-## Security / boundary
+Enrollment requires a protected JWT file and a new output file:
 
-- **Keppin-OSS CNG** owns CNG/KSP mechanics, machine-scoped key custody,
-  non-exportability, and the `crypto.Signer` implementation.
-- **This module** owns the OpenZiti CNG engine adapter, the CNG key-reference
-  syntax, and the integration glue that wires that reference into OpenZiti's
-  native enrollment flow.
-- **OpenZiti** owns identity orchestration, OTT semantics, CSR, and Controller
-  communication.
+```powershell
+go run -buildvcs=false ./examples/enroll -jwt C:\secure\identity.jwt -key Keppin.Identity.001 -out C:\secure\identity.json
+go run -buildvcs=false ./examples/loadidentity -config C:\secure\identity.json
+```
 
-The private key never leaves the CNG/KSP provider, and no PEM private key is
-persisted. Callers must create keys with Keppin-OSS CNG (for example
-`windowscng.LoadOrCreate`), use a dedicated key name, run elevated only for
-create/delete, and call `Close` on handles they no longer need.
+The enrollment example rejects raw JWT command-line arguments and refuses to
+overwrite output. It reserves the output before enrollment and checks writing,
+syncing and closing. Protect the directory using Windows ACLs: Go mode 0600 is
+not a Windows DACL guarantee. Disk/process failures after token consumption can
+still require configuration recovery; preserve the key and any partial output.
 
-## Further reading
+## Security and ownership
 
-See [docs/README.md](docs/README.md) for architecture, dispatch path, key
-lifecycle, security details, compatibility constraints, validation, and
-troubleshooting.
+CNG owns private-key custody and signing. The adapter opens existing keys and
+does not export or serialize private-key bytes. CNG v0.1.2 checks export policy
+before exposing a signer and exports a public-key blob for verification.
+This is a software-provider/API property, not hardware isolation or a guarantee
+against administrator compromise or the key's history before opening.
+
+CNG requests restrictive provisioning permissions and validates required
+principals plus selected disallowed principals. **It does not certify exclusive
+principal membership or full Windows effective access.** LOCAL SERVICE is shared
+by multiple services. See the precise [DACL boundary](docs/README.md#dacl-boundary).
+
+Close directly owned signers when no signing operation can still use them.
+Closing releases handles; it does not delete persisted keys. The pinned SDK
+does not close its internally loaded enrollment signer, and the module cannot
+retrieve it through the public enrollment API. This residual limitation is
+documented; no global signer cache is used.
+
+Protect OTT tokens, identity configuration and logs. The module sanitizes
+returned enrollment errors, but does not override the SDK's global logger.
+The separately reported Controller v2.0.3 service-session JWT logging issue is
+upstream context, outside this module's remediation.
+
+## Validation
+
+```text
+go mod verify
+go mod tidy -diff
+go build -buildvcs=false ./...
+go vet -buildvcs=false ./...
+go test -buildvcs=false -count=1 ./...
+```
+
+Default tests exercise parsing, registration, safe diagnostics, examples and
+configuration serialization. They do not perform live enrollment or create/
+delete persisted CNG keys. See [tagged fixture tests](docs/README.md#tagged-fixture-tests).
