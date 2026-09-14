@@ -4,8 +4,6 @@ package cngengine
 
 import (
 	"testing"
-
-	"github.com/openziti/identity"
 )
 
 // TestReferenceRequiresQueryDelimiter documents a concrete limitation of
@@ -24,7 +22,7 @@ func TestReferenceRequiresQueryDelimiter(t *testing.T) {
 				t.Fatal("identity.LoadKey of a cng reference without '?' should panic on Windows")
 			}
 		}()
-		_, _ = identity.LoadKey("cng:keppin-oz-noquery")
+		_, _ = loadKeyForTest(t, "cng:keppin-oz-noquery")
 	})
 
 	t.Run("trailing question mark does not panic", func(t *testing.T) {
@@ -33,9 +31,6 @@ func TestReferenceRequiresQueryDelimiter(t *testing.T) {
 				t.Fatalf("canonical reference must not panic, got: %v", r)
 			}
 		}()
-		_, _ = identity.LoadKey("cng:keppin-oz-noquery?")
+		_, _ = loadKeyForTest(t, "cng:keppin-oz-noquery?")
 	})
 }
-
-
-

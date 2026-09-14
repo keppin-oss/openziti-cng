@@ -4,15 +4,18 @@
 // It reuses the OpenZiti SDK's exported `enroll.Enroll` entry point unchanged.
 // The only responsibility of this package is to hand OpenZiti the CNG key
 // reference (never a PEM/file path and never an in-memory private key) and to
-// verify, after enrollment, that the returned certificate matches the CNG key.
+// offer a separate certificate public-key comparison helper.
 package enrollcng
 
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
+	"github.com/keppin-oss/openziti-cng/internal/diagnostic"
+	"github.com/keppin-oss/openziti-cng/internal/keyref"
 	"reflect"
-	"strings"
+	"runtime"
 
 	"github.com/keppin-oss/cng/windowscng"
 	"github.com/openziti/identity"
@@ -23,22 +26,13 @@ import (
 // KeyReference returns the OpenZiti key reference for a CNG container name.
 //
 // The reference carries only the container identity and uses the syntax
-// validated by OZCNG-001:
+// accepted by the shared strict name grammar:
 //
 //	cng:<container-name>?
 //
 // The trailing '?' is an OpenZiti identity v1.0.140 Windows parseAddr
 // compatibility workaround, not a desired permanent semantic.
-func KeyReference(name string) (string, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", fmt.Errorf("enrollcng: CNG container name is empty")
-	}
-	if strings.ContainsAny(name, "?:") {
-		return "", fmt.Errorf("enrollcng: CNG container name must not contain '?' or ':'")
-	}
-	return "cng:" + name + "?", nil
-}
+func KeyReference(name string) (string, error) { return keyref.Format(name) }
 
 // BuildFlags wires a CNG key reference into OpenZiti's native enrollment flags
 // without touching the network. It fails closed on a malformed key name before
@@ -65,6 +59,11 @@ func BuildFlags(jwtString string, claims *ziti.EnrollmentClaims, keyName string)
 // enroll.Enroll. No private key is generated, exported, or persisted by this
 // package.
 func Enroll(jwtString, keyName string) (*ziti.Config, error) {
+	// On Unix a canonical reference can be an actual filename. Do not let the
+	// SDK's os.Stat routing substitute a file-backed key for CNG.
+	if runtime.GOOS != "windows" {
+		return nil, errors.New("enrollcng: CNG enrollment requires Windows")
+	}
 	keyRef, err := KeyReference(keyName)
 	if err != nil {
 		return nil, err
@@ -72,7 +71,7 @@ func Enroll(jwtString, keyName string) (*ziti.Config, error) {
 
 	claims, _, err := enroll.ParseToken(jwtString)
 	if err != nil {
-		return nil, fmt.Errorf("enrollcng: parse OTT token: %w", err)
+		return nil, diagnostic.Safe("enrollcng: validate OTT token", err)
 	}
 
 	flags := enroll.EnrollmentFlags{
@@ -81,22 +80,41 @@ func Enroll(jwtString, keyName string) (*ziti.Config, error) {
 		KeyFile:   keyRef,
 	}
 
-	return enroll.Enroll(flags)
+	if claims.EnrollmentMethod != "ott" {
+		return nil, errors.New("enrollcng: only OTT enrollment is supported")
+	}
+	// The SDK owns the CSR signer and does not expose it for Close. See docs.
+	cfg, err := enroll.Enroll(flags)
+	if err != nil {
+		return nil, diagnostic.Safe("enrollcng: enroll", err)
+	}
+	return cfg, nil
 }
 
 // CertMatchesSigner opens the CNG key and reports whether the leaf certificate
 // returned by enrollment carries the same public key as the CNG signer. It is
-// the post-enrollment proof that the CSR was signed by the CNG-backed key.
-func CertMatchesSigner(cfg *ziti.Config, keyName string) (bool, error) {
+// a public-key equality check, not certificate trust or CSR provenance validation.
+func CertMatchesSigner(cfg *ziti.Config, keyName string) (matches bool, resultErr error) {
+	if cfg == nil {
+		return false, errors.New("enrollcng: missing enrollment configuration")
+	}
+	if err := keyref.ValidateName(keyName); err != nil {
+		return false, err
+	}
 	signer, err := windowscng.Open(keyName)
 	if err != nil {
 		return false, fmt.Errorf("enrollcng: open CNG key %q: %w", keyName, err)
 	}
-	defer func() { _ = signer.Close() }()
+	defer func() {
+		if err := signer.Close(); err != nil {
+			matches = false
+			resultErr = errors.Join(resultErr, diagnostic.Safe("enrollcng: close signer", err))
+		}
+	}()
 
 	certs, err := identity.LoadCert(cfg.ID.Cert)
 	if err != nil {
-		return false, fmt.Errorf("enrollcng: parse enrolled certificate: %w", err)
+		return false, diagnostic.Safe("enrollcng: parse enrolled certificate", err)
 	}
 	if len(certs) == 0 {
 		return false, fmt.Errorf("enrollcng: no certificate in enrollment result")
@@ -113,7 +131,3 @@ func publicKeysEqual(a, b crypto.PublicKey) bool {
 	}
 	return reflect.DeepEqual(a, b)
 }
-
-
-
-

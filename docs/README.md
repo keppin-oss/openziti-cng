@@ -1,355 +1,159 @@
-# OpenZiti-CNG — Technical Reference
+# OpenZiti-CNG technical reference
 
-This document holds the implementation-oriented material behind
-[`openziti-cng`](../README.md). It is ordered from architecture down to
-validation and troubleshooting.
+## Architecture and registration
 
-## 1. Architecture and ownership boundary
+`identity.LoadKey` dispatches a parsed engine URL through the OpenZiti engine
+registry to `cngengine`, then `windowscng.Open`. The returned CNG signer exposes
+`crypto.Signer` and `Close() error`. Each successful load opens independent
+provider/key handles. The engine itself has no mutable per-call state.
 
-The integration path is the smallest possible:
+Blank-import `cngengine` even when importing `enrollcng`; registration is a
+process-wide initialization step. Runtime replacement of registry entries is
+not part of this module's supported lifecycle.
 
-```text
-OpenZiti identity key reference
-        ↓
-identity.LoadKey(...)
-        ↓
-engines.Engine  ("cng")
-        ↓
-Keppin-OSS CNG  (windowscng)
-        ↓
-Windows CNG/KSP non-exportable key
-        ↓
-crypto.Signer
-        ↓
-sign + verify
-```
+The module delegates token verification, CSR generation and Controller exchanges
+to the SDK. An enrollment result does not establish application authorization,
+tenant membership, installation state or licensing.
 
-Ownership is deliberately split three ways:
+## Reference grammar and compatibility
 
-- **Keppin-OSS CNG** owns Windows CNG/KSP mechanics, machine-scoped key
-  custody, non-exportability, and the `crypto.Signer` implementation.
-- **Keppin-OSS OpenZiti-CNG** (this module) owns the OpenZiti CNG engine
-  adapter, the CNG key-reference syntax, and the integration glue that wires
-  that reference into OpenZiti's native enrollment flow.
-- **OpenZiti** owns identity orchestration, OTT semantics, CSR, and Controller
-  communication.
+Use `enrollcng.KeyReference(name)` to construct `cng:<name>?`.
+The exact name grammar is `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`.
+Invalid names are rejected, never normalized. Creation helpers in examples,
+comparison helpers and reference loading use the same name validation.
 
-No private key is ever exported, copied, or persisted as PEM. The private key
-never leaves the Microsoft Software Key Storage Provider.
+The pinned identity v1.0.140 Windows parser indexes the second element after
+splitting engine addresses on `?`. Without the delimiter it can panic before
+the engine runs. The trailing `?` is a version-specific workaround, not an
+instruction to send query parameters. A regression test records that upstream
+behavior. The load-identity example validates the entire string before dispatch.
 
-This module deliberately does **not** implement: a second crypto provider or
-key-store, X.509/certificate-store or trust-store behavior, Controller HTTP,
-CSR generation, or certificate issuance. OTT token parsing and the
-OTT/CSR/Controller exchange are delegated to the OpenZiti SDK
-(`enroll.ParseToken` and `enroll.Enroll`); this module does not reimplement
-that protocol.
+The engine supports the Windows `Host` representation and the opaque
+representation produced by `net/url`. Nonempty queries, fragments, user info,
+path forms and conflicting fields are rejected. The upstream Windows parser
+has already removed a leading `//` before engine dispatch; therefore this engine
+cannot distinguish that spelling from the canonical form. Validate full strings
+before dispatch where strict canonical spelling is required. Helpers and the
+load-identity example do so. A direct engine URL also cannot prove that the
+original string had the required delimiter.
 
-## 2. OpenZiti engine registration / dispatch
+With sdk-golang/v2 v2.0.0-pre4, a nonempty `KeyFile` that does not resolve to a file
+is retained as the identity key reference. Canonical references do not name
+ordinary Windows files; the OTT path loads the CNG signer to create the CSR.
+Enroll rejects non-Windows execution before the SDK can interpret a reference as an ordinary Unix filename. Direct BuildFlags/SDK callers must enforce the same platform boundary.
 
-`cngengine` implements OpenZiti's `engines.Engine` interface and registers
-itself in a package-level `init()`:
+## Key custody and lifecycle
 
-```go
-type Engine interface {
-    Id() string
-    LoadKey(key *url.URL) (crypto.PrivateKey, error)
-}
-```
+The adapter calls Open, never LoadOrCreate. Missing or invalid keys fail instead
+of creating replacements. Provisioning is performed by the caller/CNG provider.
 
-```go
-const EngineId = "cng"            // engine id and URL scheme
+CNG v0.1.2 validates export policy before returning a signer. Its public-key
+export does not export private-key material. This supports the API-level
+non-exportable signing boundary; it does not prove hardware protection, historical
+non-export, or resistance to a compromised administrator/provider.
 
-func (e *engine) Id() string      { return EngineId }
+A directly loaded signer is caller-owned. Close it only after signing users have
+stopped. CNG v0.1.2 does not synchronize Sign against Close. Do not concurrently
+close a signer or reuse it after closing. Closing a handle never removes a key.
 
-func init() {
-    engines.RegisterEngine(e)     // global, package-level registration
-}
-```
+CertMatchesSigner closes the signer it opens, including on certificate errors,
+and returns cleanup failures. It validates the name and rejects a nil config.
+It checks public-key equality only, without certificate-chain validation.
 
-The registry (`github.com/openziti/identity/engines`) exposes:
+### Residual SDK limitation
 
-```go
-func RegisterEngine(e Engine)      // global, package-level registration
-func GetEngine(id string) (Engine, bool)
-func ListEngines() []string
-```
+The pinned SDK's enrollOTT calls identity.LoadKey for its CSR signer but does not
+call Close or expose the signer to enrollcng.Enroll. That handle cannot be closed
+locally through the public API. Repeated enrollment attempts can accumulate
+native resources until process exit. Identity loading failures/reloads have
+similar dependency-owned lifetime limitations. Closing a separately opened
+signer does not repair them. This module does not introduce a global cache or
+reimplement enrollment to hide the limitation. Short-lived enrollment processes
+bound its lifetime; long-running consumers should account for the limitation.
 
-Dispatch path for a key reference:
+## DACL boundary
 
-```text
-identity.LoadKey(keyAddr)
-    -> parseAddr(keyAddr)
-    -> switch scheme:
-           "pem"      -> certtools.LoadPrivateKey
-           "file"/""  -> certtools.GetKey(nil, path, "")
-           default    -> certtools.GetKey(url, "", "")
-                              -> LoadEngineKey(url.Scheme, url)
-                              -> engines.GetEngine(scheme).LoadKey(url)
-```
+CNG v0.1.2 requests SYSTEM/Administrators full access and LOCAL SERVICE read/
+execute access when provisioning. The software KSP may canonicalize generic
+permission masks.
 
-The URL **scheme** is the engine id. `LoadEngineKey` returns
-`engine '%s' is not supported` when no engine matches that scheme.
+Its validator requires the expected SYSTEM, Administrators and LOCAL SERVICE
+allow ACEs, rejects duplicates of those principals, checks selected generic-mask
+properties and rejects allow ACEs for Everyone, Authenticated Users, Built-in
+Users, Interactive Users, Service and Anonymous. It rejects missing/null/empty
+DACLs. It does not reject every other SID or evaluate every ACE type or right.
 
-## 3. Public API details
+Consequently validation does **not** establish an exclusive principal allow-list,
+fully evaluate ownership/inheritance, or certify effective Windows access.
+LOCAL SERVICE is a shared Windows account, not isolation between services.
+Deployment ACL review and behavioral access testing remain caller responsibilities.
 
-### `cngengine`
+## Errors and logging
 
-| Symbol | Role |
-| --- | --- |
-| `EngineId` (`const`, `"cng"`) | engine identifier and reference scheme |
-| `init()` | registers the engine globally with `engines.RegisterEngine` |
-| `LoadKey(key *url.URL) (crypto.PrivateKey, error)` | opens the referenced key |
+Enroll returns stage/category diagnostics and does not retain or wrap raw SDK
+errors. This avoids disclosing enrollment URLs with token query parameters,
+JWT material or arbitrary Controller response bodies through error formatting
+or unwrapping. Network failures/timeouts retain their broad category.
 
-`LoadKey` parses the container name from the URL (`parseReference`), then opens
-an **existing** key with `windowscng.Open(name)` and returns the
-`windowscng.Signer` directly — no wrapping, no copying. The signer is a
-`crypto.Signer` and also satisfies `interface{ Close() error }`.
+The load-identity example never prints the identity key field and rejects PEM,
+file and malformed references before loading. The enrollment example accepts a
+JWT file path, not a raw JWT argument, and persists JSON to an exclusively created
+output. Protect JWT files and output directories with OS access controls.
+The output contains identity certificates and CNG references, not CNG key bytes.
 
-### `enrollcng`
+BuildFlags is an SDK integration primitive: direct callers receive flags carrying
+the JWT/claims and bypass Enroll's safe error boundary. Do not log those flags or
+raw SDK errors. The wrapper does not reconfigure the SDK's global logging or
+claim that all upstream diagnostics are sanitized.
 
-| Symbol | Role |
-| --- | --- |
-| `KeyReference(name) (string, error)` | build the `cng:<name>?` reference |
-| `BuildFlags(jwt, claims, name) (enroll.EnrollmentFlags, error)` | wire the reference into enrollment flags (no network) |
-| `Enroll(jwt, name) (*ziti.Config, error)` | native OTT enrollment |
-| `CertMatchesSigner(cfg, name) (bool, error)` | prove the enrolled cert matches the CNG key |
+The separately reported OpenZiti Controller v2.0.3 service-session JWT logging
+issue is upstream context. This module neither fixes nor reproduces that issue.
 
-`Enroll` builds the key reference, calls `enroll.ParseToken(jwt)` to parse the
-OTT token, wires the reference into `enroll.EnrollmentFlags` (`KeyFile` =
-reference), and then delegates to the SDK's `enroll.Enroll`. No private key is
-generated, exported, or persisted by this package.
+## Validation boundaries
 
-### OTT JWT resolution (`ottjwt.go`)
+Default tests check name/reference round trips and rejection, engine registration,
+expected dispatch/platform errors, token-source handling, error redaction,
+rejection of private-key output, and configuration serialization/no-overwrite.
+They use synthetic identity/token material; no live Controller is required.
 
-`loadOTTJWT` resolves an OTT JWT source value that may be either a filesystem
-path or the raw JWT string. A value that clearly names a path — it contains a
-path separator or carries a `.jwt` extension — is read from disk; a read
-failure is surfaced explicitly rather than being silently reinterpreted as a
-malformed raw JWT. Any other value is returned verbatim as the raw JWT. This
-helper backs the live enrollment proof (see [Validation](#8-validation--testing)).
+A successful sign/verify test establishes that the tested signature verifies
+against the returned public key. A type assertion rejecting *ecdsa.PrivateKey
+only establishes the returned Go type. Neither proves that private material was
+never copied elsewhere. Absence of .pem/.key files is not automatically measured.
+Token reuse/consumption, actual ACL behavior and complete TLS SDK operation
+require separate controlled integration validation.
 
-## 4. Key-reference parsing and lifecycle
+### Tagged fixture tests
 
-Canonical reference: `cng:<container-name>?`
+The pinned CNG API exposes Open/LoadOrCreate/Delete but no atomic create-exclusive
+operation or created-by-this-call result. A random name plus an absence check
+does not establish deletion ownership. Therefore tagged tests **never create or
+delete persisted keys**. They own only the handles they open; cleanup errors fail.
 
-- `cng` is the engine id (the URL scheme).
-- `<container-name>` is the exact CNG container/key name; it carries only the
-  container identity, never key bytes.
-- The trailing `?` is **mandatory on Windows** — see
-  [Compatibility](#6-compatibility-identity-v10140-trailing-).
-
-`cngengine.parseReference` extracts the container name from the parsed
-`*url.URL`. The exact shape differs by platform:
-
-- On Windows, `identity.parseAddr` (`address_windows.go`) places the container
-  name in `url.Host` and any query string in `url.RawQuery`.
-- On non-Windows, `identity.parseAddr` (`address.go`) uses `net/url.Parse`,
-  which places an opaque reference (including any `?query` suffix) in
-  `url.Opaque`.
-
-The engine accepts both shapes (`Host`, then `Opaque`, then `Path`), strips any
-`?query` suffix, trims whitespace, and rejects an empty name. It never
-falls back to treating the reference as PEM or file material.
-
-`enrollcng.KeyReference` rejects an empty name and any name containing `?` or
-`:`, failing closed before an insecure fallback could occur.
-
-Example identity configuration `key` value:
-
-```text
-key: cng:keppin-identity-001?
-```
-
-Key lifecycle and ownership:
-
-- **The private key is owned by CNG/KSP**, not by this module and not by the
-  returned signer. It persists until the caller deletes it (`windowscng.Delete`).
-- **`windowscng.LoadOrCreate`/`Open`** return a `windowscng.Signer`, which is a
-  `crypto.Signer` **and** `interface{ Close() error }`. `Close` releases the
-  underlying CNG provider and key handles.
-- **`identity.LoadKey("cng:<name>?")`** returns the signer as a
-  `crypto.PrivateKey`. Type-assert it to `crypto.Signer` to sign and to
-  `interface{ Close() error }` to release handles. It is **not** a
-  `*ecdsa.PrivateKey`; there is no in-memory private material.
-- **`enrollcng.Enroll`** returns `*ziti.Config` owned by the caller. The
-  config's `ID.Key` is the `cng:` reference; the config is otherwise owned and
-  loaded/persisted by the OpenZiti SDK.
-
-Key creation is **not** part of this module's API. Create keys with
-Keppin-OSS CNG (`windowscng.LoadOrCreate`) or through Keppin itself, using a
-dedicated name that is never a Keppin production key name.
-
-## 5. Security guarantees and caller responsibilities
-
-Guaranteed by the module and its boundary:
-
-- the permanent private key remains in Windows CNG/KSP;
-- no private-key export (export policy is asserted before any signer is
-  exposed);
-- no PEM private-key persistence for SDK convenience;
-- no custom OpenZiti OTT enrollment implementation (the SDK's `enroll.ParseToken`
-  and `enroll.Enroll` are reused unchanged);
-- the key is machine-scoped with a least-privilege DACL (SYSTEM,
-  Administrators, LOCAL SERVICE only — enforced by Keppin-OSS CNG).
-
-Caller responsibilities:
-
-- run elevated only when creating/deleting a machine-scoped key (opening and
-  signing an existing key are governed by the DACL);
-- use a dedicated key name; never reuse a Keppin production key name;
-- call `Close` on signers/handles you no longer need;
-- treat the `cng:` reference as non-secret identity, and protect any OTT JWT as
-  a single-use secret (never commit it);
-- keep Keppin-OSS CNG as the single owner of CNG key custody — do not
-  reimplement key creation/export elsewhere.
-
-A successful OpenZiti OTT enrollment means only that an OpenZiti identity has
-been enrolled. It does **not**, by itself, establish Keppin application
-authorization, Installation state, Tenant membership, or licensing.
-
-## 6. Compatibility: identity v1.0.140 trailing `?`
-
-`identity.parseAddr` (`address_windows.go` in identity `v1.0.140`)
-unconditionally indexes the result of splitting the address on `?`:
-
-```go
-pathAndArgs := strings.SplitN(u[1], "?", 2)
-return &url.URL{ ... RawQuery: pathAndArgs[1] }
-```
-
-A reference without `?` therefore panics (`index out of range`) before reaching
-any engine. The trailing `?` is a **version-specific compatibility workaround
-for `github.com/openziti/identity v1.0.140`**, not an eternal semantic of this
-module. On non-Windows the `?` is harmless. Any query text after `?` is ignored
-by this engine.
-
-`enrollcng.KeyReference` and `enrollcng.Enroll` own the construction of this
-reference. Do not re-derive it in consumer code; call the helper.
-
-Verified against the currently resolved `identity v1.0.140`
-(`address_windows.go`; confirmed by `TestReferenceRequiresQueryDelimiter`).
-
-## 7. Compatibility: sdk-golang/v2 v2.0.0-pre4 enrollment routing
-
-Native `enroll.Enroll` (`v2.0.0-pre4`) handles a non-empty `KeyFile` by calling
-`os.Stat(KeyFile)`:
-
-```go
-if enFlags.Token.EnrollmentMethod != "updb" {
-    if strings.TrimSpace(enFlags.KeyFile) != "" {
-        stat, err := os.Stat(enFlags.KeyFile)
-        if stat != nil && !os.IsNotExist(err) {
-            // existing file -> cfg.ID.Key = "file://" + absPath
-        } else {
-            // not a file -> cfg.ID.Key = enFlags.KeyFile  (engine reference)
-        }
-    } else {
-        // generate an in-memory PEM key
-    }
-}
-```
-
-When `os.Stat` does not resolve to an existing file, `KeyFile` is forwarded
-verbatim as `cfg.ID.Key`, which `identity.LoadKey` later resolves through the
-engine registry. A `cng:<name>?` value always fails `os.Stat` (it contains `:`
-and `?`), so it is routed into the CNG engine rather than the
-PEM-key-generation branch. `enrollOTT` then calls `identity.LoadKey(cfg.ID.Key)`
-and uses the returned signer to produce the CSR, so the private key stays
-CNG-backed throughout.
-
-## 8. Validation / testing
-
-### Automated
-
-```text
-go build ./...
-go vet ./...
-go test ./...
-```
-
-Automated tests cover reference parsing/rejection, engine registration and
-dispatch, missing-key error mapping, OTT JWT source resolution, and the
-guarantee that a `cng:` reference is never interpreted as PEM or as a file
-path. They do **not** require a live Controller or Administrator privileges.
-
-### Windows integration proof (manual Administrator run)
-
-The sign/verify path through `identity.LoadKey` requires a machine-scoped CNG
-key, which needs an elevated process. It is gated behind the `cng_smoke` build
-tag and is **not** run by `go test ./...`.
-
-Run from an **Administrator** PowerShell prompt:
+The operator should provision a fresh test-only key using CNG in a protected
+environment, with a unique name beginning with the required `OpenZitiCNG.Test.`
+prefix, for example `OpenZitiCNG.Test.<random-guid>`. Both tagged tests fail if a
+configured `CNG_TEST_KEY_NAME` is outside this namespace, even without a token.
+Keep ownership records and perform any persisted-key cleanup outside these tests.
+Never use production keys. The former CNG_KEY_NAME/default shared fixture is
+replaced by explicit CNG_TEST_KEY_NAME.
 
 ```powershell
-go test -tags cng_smoke ./cngengine/ -run TestIdentityLoadKeySignVerify -v
+# Choose a unique name, then provision it separately with Keppin-OSS CNG.
+$env:CNG_TEST_KEY_NAME = "OpenZitiCNG.Test." + [guid]::NewGuid().ToString("N")
+# After provisioning:
+go test -buildvcs=false -tags cng_smoke ./cngengine -run TestIdentityLoadKeySignVerify -count=1
+# Live enrollment additionally requires a disposable identity and fresh OTT file:
+$env:ZITI_OTT_JWT = "C:\secure\test-identity.jwt"
+go test -buildvcs=false -tags cng_enroll ./enrollcng -run TestLiveOttEnrollmentWithCNGKey -count=1
 ```
 
-Expected observation:
+Only absent explicit fixture/token configuration skips these tests. Once configured,
+key-open/security-validation, signing, enrollment, verification and cleanup
+failures fail the test. Opening a provisioned fixture is governed by its DACL;
+tests do not infer administrator absence from an arbitrary provider failure.
+The live test consumes an OTT token and does not save its disposable configuration.
 
-```text
-=== RUN   TestIdentityLoadKeySignVerify
---- PASS: TestIdentityLoadKeySignVerify
-PASS
-```
-
-If the process is not elevated, the test reports
-`NOT EXECUTED — requires manual Administrator run` and skips (the implementation
-is never weakened to satisfy the non-elevated environment).
-
-The test creates key `Keppin.Test.OpenZiti.CNG.v1`, signs a SHA-256 digest
-through the CNG-backed `crypto.Signer`, verifies it against `signer.Public()`,
-asserts no materialized `*ecdsa.PrivateKey` was returned, and deletes the key.
-
-## 9. Live Controller proof (manual Administrator + Controller run)
-
-The decisive proof requires a reachable OpenZiti Controller and a single-use OTT
-JWT, plus elevation for the machine-scoped key. It is gated behind the
-`cng_enroll` build tag and is **not** run by `go test ./...`.
-
-From an **Administrator** PowerShell prompt:
-
-```powershell
-# 1. Create a dedicated identity and export its single-use OTT JWT
-#    (OpenZiti v2 CLI: the identity-type positional argument was removed):
-ziti edge create identity "keppin-oss-cng-test" -o "C:\tmp\keppin-oss-cng-test.jwt"
-
-# 2. Run the live enrollment proof (ZITI_OTT_JWT may be a path or the raw JWT):
-$env:ZITI_OTT_JWT = "C:\tmp\keppin-oss-cng-test.jwt"
-$env:CNG_KEY_NAME = "Keppin.Test.OpenZiti.CNG.v1"
-go test -tags cng_enroll ./enrollcng/ -run TestLiveOttEnrollmentWithCNGKey -v
-
-# 3. Clean up:
-ziti edge delete identity "keppin-oss-cng-test"
-```
-
-Expected PASS observations: native `enroll.Enroll` completes, `cfg.ID.Key`
-remains `cng:Keppin.Test.OpenZiti.CNG.v1?`, `CertMatchesSigner` returns `true`,
-and no `*.pem`/`*.key` file is created. Verify the OTT token was consumed by
-re-running the same JWT (it must now fail) or by listing the enrolled identity.
-
-The test skips when `ZITI_OTT_JWT` is missing, and skips as requiring the
-Administrator/manual environment when the machine CNG key cannot be
-created/opened. Once those prerequisites are present, a native OTT enrollment
-failure — including an unreachable Controller or an enrollment error — is a
-test failure, not a skip.
-
-## 10. Troubleshooting
-
-Work through these in order; source inspection is a last resort.
-
-1. **"engine not supported" / non-Windows error** — confirm you blank-imported
-   `cngengine`, and confirm you are on Windows. The engine is a Windows CNG/KSP
-   adapter.
-2. **`index out of range` / panic on a `cng:` reference without `?`** — use the
-   canonical `cng:<name>?` form (or `enrollcng.KeyReference`). This is the
-   identity `v1.0.140` workaround documented in
-   [Compatibility](#6-compatibility-identity-v10140-trailing-).
-3. **`windowscng: persisted CNG key not found`** — the exact container name does
-   not exist yet. Create it with `windowscng.LoadOrCreate` in an elevated
-   process.
-4. **security validation / DACL / export-policy failure** — the existing key was
-   not created with the Keppin-OSS CNG least-privilege settings. Recreate it
-   with Keppin-OSS CNG rather than a generic tool.
-5. **enrollment fails** — verify the Controller is reachable, the OTT JWT is
-   valid and single-use, and the key exists. Enrollment is delegated to the
-   SDK; it is not a local key problem.
+Compile tags without running live tests using `go test -c -buildvcs=false -tags
+cng_smoke ./cngengine` and the corresponding cng_enroll command with a selected
+output location. Ordinary tests do not exercise these tagged paths.

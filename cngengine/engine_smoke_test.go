@@ -7,36 +7,31 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"github.com/keppin-oss/openziti-cng/internal/keyref"
+	"os"
+	"strings"
 	"testing"
 
-	"github.com/keppin-oss/cng/windowscng"
 	"github.com/openziti/identity"
 )
 
-// testLifecycleKeyName is a dedicated test-namespace key. It must never equal a
-// Keppin production key name.
-const testLifecycleKeyName = "Keppin.Test.OpenZiti.CNG.v1"
-
-// TestIdentityLoadKeySignVerify proves the full integration path end to end:
-//
-//	identity.LoadKey("cng:<name>?") -> windowscng -> CNG/KSP -> crypto.Signer
-//	    -> Sign(...) -> verify with signer.Public()
-//
-// It requires an elevated (Administrator) process because it creates a
-// machine-scoped, non-exportable CNG key. When not elevated it reports
-// "NOT EXECUTED — requires manual Administrator run".
+// TestIdentityLoadKeySignVerify uses an operator-provisioned, dedicated fixture.
+// It never creates or deletes persisted keys.
 func TestIdentityLoadKeySignVerify(t *testing.T) {
-	// Create (or open) the machine-scoped test key. This is the only step that
-	// needs elevation; if it fails, skip rather than weaken anything.
-	if _, err := windowscng.LoadOrCreate(testLifecycleKeyName); err != nil {
-		t.Skipf("NOT EXECUTED — requires manual Administrator run: %v", err)
+	name := os.Getenv("CNG_TEST_KEY_NAME")
+	if name == "" {
+		t.Skip("set CNG_TEST_KEY_NAME to an explicitly provisioned test fixture")
 	}
-	t.Cleanup(func() {
-		_ = windowscng.Delete(testLifecycleKeyName)
-	})
-
+	// Fixture namespace is test-only; the general CNG name grammar is unchanged.
+	if !strings.HasPrefix(name, "OpenZitiCNG.Test.") {
+		t.Fatal("CNG_TEST_KEY_NAME must start with OpenZitiCNG.Test.")
+	}
+	ref, err := keyref.Format(name)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Resolve through the normal OpenZiti identity loading path.
-	priv, err := identity.LoadKey("cng:" + testLifecycleKeyName + "?")
+	priv, err := identity.LoadKey(ref)
 	if err != nil {
 		t.Fatalf("identity.LoadKey: %v", err)
 	}
@@ -47,7 +42,11 @@ func TestIdentityLoadKeySignVerify(t *testing.T) {
 	}
 
 	if closer, ok := priv.(interface{ Close() error }); ok {
-		defer func() { _ = closer.Close() }()
+		defer func() {
+			if err := closer.Close(); err != nil {
+				t.Errorf("close signer: %v", err)
+			}
+		}()
 	}
 
 	// Deterministic digest.
@@ -67,12 +66,9 @@ func TestIdentityLoadKeySignVerify(t *testing.T) {
 		t.Fatal("signature did not verify against signer.Public()")
 	}
 
-	// The key must not be a plaintext ECDSA private key: prove no private
-	// material was returned by identity.LoadKey.
+	// Check only the returned Go type; this is not proof that private
+	// material was never copied elsewhere.
 	if _, isMaterial := priv.(*ecdsa.PrivateKey); isMaterial {
 		t.Fatal("identity.LoadKey returned a materialized *ecdsa.PrivateKey")
 	}
 }
-
-
-
