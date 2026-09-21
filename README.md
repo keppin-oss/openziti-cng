@@ -5,7 +5,7 @@ keys in the Microsoft Software Key Storage Provider.
 
 ## Dependencies
 
-- Go 1.26.5
+- Go 1.26.8
 - github.com/keppin-oss/cng **v0.1.2**
 - github.com/openziti/identity **v1.0.140**
 - github.com/openziti/sdk-golang/v2 **v2.0.0-pre4**

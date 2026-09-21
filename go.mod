@@ -1,6 +1,6 @@
 module github.com/keppin-oss/openziti-cng
 
-go 1.26.5
+go 1.26.8
 
 require (
 	github.com/openziti/identity v1.0.140
