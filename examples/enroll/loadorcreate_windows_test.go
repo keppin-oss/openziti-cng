@@ -1,0 +1,40 @@
+//go:build windows
+
+package main
+
+import (
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/keppin-oss/cng/windowscng"
+)
+
+// These tests use synthetic errors built around the real windowscng
+// sentinels. No CNG key is created, opened or deleted.
+
+func TestLoadOrCreateErrorRecognizesRealCleanupFailedSentinel(t *testing.T) {
+	// Same shape windowscng uses: the original failure joined with a
+	// wrapped ErrCleanupFailed that carries native details.
+	native := errors.Join(syntheticNative(), fmt.Errorf("%w: NCryptDeleteKey hr=0x80090016 Keppin.Secret.Key", windowscng.ErrCleanupFailed))
+	if !isCleanupFailed(native) {
+		t.Fatal("adapter does not recognize windowscng.ErrCleanupFailed")
+	}
+	err := loadOrCreateError(native)
+	assertCleanupError(t, err)
+	if errors.Is(err, windowscng.ErrCleanupFailed) {
+		t.Fatal("native error chain must not be retained")
+	}
+}
+
+func TestLoadOrCreateErrorKeyNotFoundStaysGeneric(t *testing.T) {
+	native := fmt.Errorf("key %q: NCryptOpenKey hr=0x80090016: %w", "Keppin.Secret.Key", windowscng.ErrKeyNotFound)
+	if isCleanupFailed(native) {
+		t.Fatal("ErrKeyNotFound misclassified as a cleanup failure")
+	}
+	err := loadOrCreateError(native)
+	assertGenericError(t, err)
+	if errors.Is(err, windowscng.ErrKeyNotFound) {
+		t.Fatal("native error chain must not be retained")
+	}
+}

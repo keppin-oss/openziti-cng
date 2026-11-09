@@ -35,6 +35,3 @@ func loadOTTJWT(raw string) (string, error) {
 func looksLikePath(raw string) bool {
 	return strings.ContainsAny(raw, `/\`) || strings.HasSuffix(strings.ToLower(raw), ".jwt")
 }
-
-
-
