@@ -79,6 +79,3 @@ func TestLooksLikePath(t *testing.T) {
 		}
 	}
 }
-
-
-
