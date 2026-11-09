@@ -59,6 +59,15 @@ func loadOrCreateError(err error) error {
 	return diagnostic.Safe("load or create CNG key", err)
 }
 
+// certMatchError redacts a CertMatchesSigner failure at this command's
+// boundary, before it can reach log.Fatal. The helper keeps its public
+// contract (its open failure wraps the windowscng error, key name and HRESULT
+// included, so callers can test errors.Is(err, windowscng.ErrKeyNotFound)),
+// but this command must not print those details.
+func certMatchError(err error) error {
+	return diagnostic.Safe("enrollment succeeded and configuration saved; verify saved certificate against CNG key", err)
+}
+
 func run(jwtPath, keyName, output string) (resultErr error) {
 	if _, err := enrollcng.KeyReference(keyName); err != nil {
 		return err
@@ -106,7 +115,7 @@ func run(jwtPath, keyName, output string) (resultErr error) {
 	}
 	ok, err := enrollcng.CertMatchesSigner(cfg, keyName)
 	if err != nil {
-		return err
+		return certMatchError(err)
 	}
 	if !ok {
 		return errors.New("saved certificate does not match the CNG signer")

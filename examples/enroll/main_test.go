@@ -60,6 +60,42 @@ func TestCleanupErrorMessageIsSpecificAndSafe(t *testing.T) {
 	assertCleanupError(t, errKeyMayPersist)
 }
 
+// errSyntheticSentinel stands in for windowscng.ErrKeyNotFound, which is
+// declared only on Windows; the redaction must not depend on the platform.
+var errSyntheticSentinel = errors.New("windowscng: persisted CNG key not found or not accessible")
+
+// TestCertMatchErrorRedactsHelperFailure exercises certMatchError, the
+// boundary run uses for CertMatchesSigner failures, with errors shaped like
+// the helper's real open failure (key name + %w native cause) and joined
+// variants. No CNG key is opened, created or deleted.
+func TestCertMatchErrorRedactsHelperFailure(t *testing.T) {
+	nativeOpen := fmt.Errorf("key %q: NCryptOpenKey hr=0x80090016: %w", "Keppin.Secret.Key", errSyntheticSentinel)
+	cases := map[string]error{
+		"helper open failure (%w chain)": fmt.Errorf("enrollcng: open CNG key %q: %w", "Keppin.Secret.Key", nativeOpen),
+		"joined native details":          errors.Join(fmt.Errorf("enrollcng: open CNG key %q: %w", "Keppin.Secret.Key", nativeOpen), syntheticNative()),
+		"DLL/path style failure":         fmt.Errorf("load C:\\secret\\ncrypt.dll for TOKEN_SECRET: %w", syntheticNative()),
+	}
+	for name, native := range cases {
+		t.Run(name, func(t *testing.T) {
+			// Guard: the unredacted error (what run returned before) leaks.
+			if !strings.Contains(native.Error(), "Keppin.Secret.Key") {
+				t.Fatalf("fixture must carry sensitive markers: %v", native)
+			}
+			err := certMatchError(native)
+			if err == nil {
+				t.Fatal("helper failure must stay an error")
+			}
+			if !strings.Contains(err.Error(), "verify saved certificate against CNG key") || !strings.Contains(err.Error(), "sensitive details withheld") {
+				t.Fatalf("safe, actionable error expected, got: %v", err)
+			}
+			assertNoSensitive(t, err)
+			if errors.Is(err, errSyntheticSentinel) || errors.Is(err, native) || errors.Unwrap(err) != nil {
+				t.Fatal("native error chain must not be retained")
+			}
+		})
+	}
+}
+
 func TestLoadOrCreateErrorOtherFailuresStayGeneric(t *testing.T) {
 	native := syntheticNative()
 	err := loadOrCreateError(native)
