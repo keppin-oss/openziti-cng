@@ -42,6 +42,23 @@ func writeConfig(f *os.File, cfg *ziti.Config, ref string) error {
 	return nil
 }
 
+// errKeyMayPersist is the operator-facing error for a LoadOrCreate failure in
+// which windowscng could not delete the key it had just created. It is a fixed
+// message: it never carries the native error, key name, token or paths.
+var errKeyMayPersist = errors.New("load or create CNG key: creation or validation failed and the newly created key could not be removed; it may still be persisted, verify it and perform a controlled manual cleanup before retrying (sensitive details withheld)")
+
+// loadOrCreateError maps a windowscng.LoadOrCreate failure to a safe error.
+// windowscng.ErrCleanupFailed gets a specific message because the operator
+// must act on a possibly persisted key; every other failure stays generic.
+// isCleanupFailed is the platform adapter: windowscng.ErrCleanupFailed is
+// declared only on Windows (loadorcreate_windows.go / loadorcreate_other.go).
+func loadOrCreateError(err error) error {
+	if isCleanupFailed(err) {
+		return errKeyMayPersist
+	}
+	return diagnostic.Safe("load or create CNG key", err)
+}
+
 func run(jwtPath, keyName, output string) (resultErr error) {
 	if _, err := enrollcng.KeyReference(keyName); err != nil {
 		return err
@@ -73,7 +90,7 @@ func run(jwtPath, keyName, output string) (resultErr error) {
 	}()
 	signer, err := windowscng.LoadOrCreate(keyName)
 	if err != nil {
-		return diagnostic.Safe("load or create CNG key", err)
+		return loadOrCreateError(err)
 	}
 	if err := signer.Close(); err != nil {
 		return diagnostic.Safe("close setup signer", err)
