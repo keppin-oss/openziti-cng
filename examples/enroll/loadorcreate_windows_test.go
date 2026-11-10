@@ -27,6 +27,25 @@ func TestLoadOrCreateErrorRecognizesRealCleanupFailedSentinel(t *testing.T) {
 	}
 }
 
+// TestRunLoadOrCreateCleanupFailedIsSpecific drives run with the v0.2.2 shape
+// of a failed rollback (original failure joined with a wrapped
+// ErrCleanupFailed, as returned when the signer cannot be built after a new
+// key was created and deleting it failed). run must stop before enrollment,
+// return the specific operator error and drop the reserved output.
+func TestRunLoadOrCreateCleanupFailedIsSpecific(t *testing.T) {
+	stubLoadOrCreate(t, func(string) (windowscng.Signer, error) {
+		return nil, errors.Join(syntheticNative(), fmt.Errorf("%w: NCryptDeleteKey hr=0x80090016 Keppin.Secret.Key", windowscng.ErrCleanupFailed))
+	})
+	jwtPath, output := runFixture(t)
+
+	err := run(jwtPath, runKeyName, output)
+	assertCleanupError(t, err)
+	if errors.Is(err, windowscng.ErrCleanupFailed) {
+		t.Fatal("native error chain must not be retained")
+	}
+	assertOutputRemoved(t, output)
+}
+
 func TestLoadOrCreateErrorKeyNotFoundStaysGeneric(t *testing.T) {
 	native := fmt.Errorf("key %q: NCryptOpenKey hr=0x80090016: %w", "Keppin.Secret.Key", windowscng.ErrKeyNotFound)
 	if isCleanupFailed(native) {

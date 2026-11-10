@@ -6,7 +6,7 @@ keys in the Microsoft Software Key Storage Provider.
 ## Dependencies
 
 - Go 1.26.8
-- github.com/keppin-oss/cng **v0.2.1**
+- github.com/keppin-oss/cng **v0.2.2**
 - github.com/openziti/identity **v1.0.140**
 - github.com/openziti/sdk-golang/v2 **v2.0.0-pre4**
 
@@ -70,17 +70,20 @@ errors are redacted: if `windowscng.LoadOrCreate` reports `ErrCleanupFailed`, it
 prints a fixed message saying the newly created key may still be persisted and
 needs verification and controlled manual cleanup; any other key failure, and a
 failure to verify the saved certificate against the CNG key after enrollment,
-is reported only by stage and broad category. The absence of that specific
-message does **not** prove that no new key was persisted: after any
-`LoadOrCreate` failure, check whether the named key exists before retrying (see
-[key custody](docs/README.md#key-custody-and-lifecycle)).
+is reported only by stage and broad category. With CNG v0.2.2, `LoadOrCreate`
+attempts a best-effort rollback of a key created by the failing call (including
+when exporting its public key fails) and reports `ErrCleanupFailed` only when
+that rollback fails. The rollback is not transactional, so a generic failure is
+not proof that no new key exists: check whether the named key exists before
+retrying (see [key custody](docs/README.md#key-custody-and-lifecycle)).
 
 ## Security and ownership
 
 CNG owns private-key custody and signing. The adapter opens existing keys and
-does not export or serialize private-key bytes. CNG v0.2.1 checks export policy
+does not export or serialize private-key bytes. CNG v0.2.2 checks export policy
 and the DACL before exposing a signer and exports a public-key blob for
-verification.
+verification; an anomalous public-key export result is returned as an error
+instead of causing a panic.
 This is a software-provider/API property, not hardware isolation or a guarantee
 against administrator compromise or the key's history before opening.
 
@@ -90,7 +93,7 @@ principal membership or full Windows effective access.** LOCAL SERVICE is shared
 by multiple services. See the precise [DACL boundary](docs/README.md#dacl-boundary).
 
 Close directly owned signers when no signing operation can still use them.
-With CNG v0.2.1, `Sign` and `Close` are synchronized and `Close` is idempotent,
+Since CNG v0.2.1, `Sign` and `Close` are synchronized and `Close` is idempotent,
 but `Close` does not drain in-flight callers.
 Closing releases handles; it does not delete persisted keys. The pinned SDK
 does not close its internally loaded enrollment signer, and the module cannot
@@ -113,5 +116,9 @@ go test -buildvcs=false -count=1 ./...
 ```
 
 Default tests exercise parsing, registration, safe diagnostics, examples and
-configuration serialization. They do not perform live enrollment or create/
-delete persisted CNG keys. See [tagged fixture tests](docs/README.md#tagged-fixture-tests).
+configuration serialization, plus error propagation and signer-close handling
+around `Open`/`LoadOrCreate` using in-memory fake signers. They do not perform
+live enrollment or create/delete persisted CNG keys. On Windows a few default
+tests open the software KSP to look up key names that do not exist. See
+[validation boundaries](docs/README.md#validation-boundaries) and
+[tagged fixture tests](docs/README.md#tagged-fixture-tests).

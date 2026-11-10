@@ -91,6 +91,11 @@ func Enroll(jwtString, keyName string) (*ziti.Config, error) {
 	return cfg, nil
 }
 
+// openSigner is windowscng.Open. It is a package variable only so in-package
+// tests can inject Open failures and fake signers without touching a real KSP
+// key; production code never reassigns it.
+var openSigner = windowscng.Open
+
 // CertMatchesSigner opens the CNG key and reports whether the leaf certificate
 // returned by enrollment carries the same public key as the CNG signer. It is
 // a public-key equality check, not certificate trust or CSR provenance validation.
@@ -101,7 +106,7 @@ func CertMatchesSigner(cfg *ziti.Config, keyName string) (matches bool, resultEr
 	if err := keyref.ValidateName(keyName); err != nil {
 		return false, err
 	}
-	signer, err := windowscng.Open(keyName)
+	signer, err := openSigner(keyName)
 	if err != nil {
 		return false, fmt.Errorf("enrollcng: open CNG key %q: %w", keyName, err)
 	}
