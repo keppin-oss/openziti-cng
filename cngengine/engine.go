@@ -36,13 +36,18 @@ func (e *engine) LoadKey(key *url.URL) (crypto.PrivateKey, error) {
 		return nil, err
 	}
 
-	signer, err := windowscng.Open(name)
+	signer, err := openSigner(name)
 	if err != nil {
 		return nil, err
 	}
 
 	return signer, nil
 }
+
+// openSigner is windowscng.Open. It is a package variable only so in-package
+// tests can inject Open failures and fake signers without touching a real KSP
+// key; production code never reassigns it.
+var openSigner = windowscng.Open
 
 // e is the process-wide engine instance. Registration is package-level and
 // global to the process, mirroring how OpenZiti's own engines register.

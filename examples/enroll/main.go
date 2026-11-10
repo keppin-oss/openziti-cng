@@ -45,7 +45,7 @@ func writeConfig(f *os.File, cfg *ziti.Config, ref string) error {
 // errKeyMayPersist is the operator-facing error for a LoadOrCreate failure in
 // which windowscng could not delete the key it had just created. It is a fixed
 // message: it never carries the native error, key name, token or paths.
-var errKeyMayPersist = errors.New("load or create CNG key: creation or validation failed and the newly created key could not be removed; it may still be persisted, verify it and perform a controlled manual cleanup before retrying (sensitive details withheld)")
+var errKeyMayPersist = errors.New("load or create CNG key: a step after creating a new key failed (for example finalization, validation or signer setup, including public-key export) and the newly created key could not be removed; it may still be persisted, verify it and perform a controlled manual cleanup before retrying (sensitive details withheld)")
 
 // loadOrCreateError maps a windowscng.LoadOrCreate failure to a safe error.
 // windowscng.ErrCleanupFailed gets a specific message because the operator
@@ -67,6 +67,11 @@ func loadOrCreateError(err error) error {
 func certMatchError(err error) error {
 	return diagnostic.Safe("enrollment succeeded and configuration saved; verify saved certificate against CNG key", err)
 }
+
+// loadOrCreateSigner is windowscng.LoadOrCreate. It is a package variable only
+// so tests can inject LoadOrCreate failures and fake signers without creating,
+// opening or deleting a real CNG key; production code never reassigns it.
+var loadOrCreateSigner = windowscng.LoadOrCreate
 
 func run(jwtPath, keyName, output string) (resultErr error) {
 	if _, err := enrollcng.KeyReference(keyName); err != nil {
@@ -97,7 +102,7 @@ func run(jwtPath, keyName, output string) (resultErr error) {
 			}
 		}
 	}()
-	signer, err := windowscng.LoadOrCreate(keyName)
+	signer, err := loadOrCreateSigner(keyName)
 	if err != nil {
 		return loadOrCreateError(err)
 	}

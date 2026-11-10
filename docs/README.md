@@ -47,13 +47,20 @@ Enroll rejects non-Windows execution before the SDK can interpret a reference as
 The adapter calls Open, never LoadOrCreate. Missing or invalid keys fail instead
 of creating replacements. Provisioning is performed by the caller/CNG provider.
 
-CNG v0.2.1 validates export policy and the DACL before returning a signer (the
+CNG v0.2.2 validates export policy and the DACL before returning a signer (the
 validation logic is unchanged from v0.1.2). Its public-key export does not export
 private-key material. This supports the API-level non-exportable signing
 boundary; it does not prove hardware protection, historical non-export, or
 resistance to a compromised administrator/provider.
 
-A directly loaded signer is caller-owned. In CNG v0.2.1 a Windows signer is safe
+Since CNG v0.2.2, an anomalous public-key export result (a zero size reported by
+the size query, or a written length of zero or larger than the buffer) is
+returned as an error from `Open`/`LoadOrCreate` instead of causing a panic. The
+adapter returns that error from `LoadKey` unchanged, without a signer. This
+is a defensive guard; this module does not show that the real KSP produces such
+results.
+
+A directly loaded signer is caller-owned. Since CNG v0.2.1 a Windows signer is safe
 for concurrent use: Sign calls may overlap each other and Close, a Sign ordered
 after Close fails without calling CNG, and Close is idempotent (the first call
 reports release failures, later calls return nil). Close does not drain callers;
@@ -68,19 +75,25 @@ regeneration or overwrite of an identity key. `windowscng.Delete` deletes exactl
 the named key; on "not found or not accessible" it deletes nothing and returns an
 error wrapping `ErrKeyNotFound`, which does not prove the key is gone.
 
-`windowscng.LoadOrCreate` may return `windowscng.ErrCleanupFailed`, joined with
-the original failure, when it created a new key, validation failed and deleting
-that new key also failed: the new key may persist and must be inspected.
-Pre-existing keys are never deleted on that path. The adapter never calls
+When `windowscng.LoadOrCreate` (CNG v0.2.2) fails after the call itself has
+created and finalized a new key (for example finalization, validation or, new
+in v0.2.2, building the signer, which includes exporting the public key), it
+attempts a best-effort rollback. It deletes that key through the handle it
+created, never by name. If the delete succeeds, the original error is returned
+and notes that the created key was deleted. If the delete also fails, the
+original error is joined with `windowscng.ErrCleanupFailed`: the new key may
+persist and must be inspected. Keys that existed before the call, and keys
+opened with `Open`, are never deleted on these paths. The adapter never calls
 LoadOrCreate; only the enrollment example does (see Errors and logging).
 
-**Residual risk:** `ErrCleanupFailed` identifies one known case in which a newly
-created key may persist; its absence does **not** prove that no key was
-persisted. Other `LoadOrCreate` failure paths in CNG v0.2.1 (for example a
-failure while exporting the public key of a newly created key) can return a
-generic error while the new key remains. After any `LoadOrCreate` failure,
-verify whether the named key exists before retrying, and clean it up in a
-controlled way if it does.
+**Residual risk:** the rollback is not transactional. A finalized key is
+visible to other processes before it is deleted. Termination of the process
+between creation and rollback can leave it in place. Rollback behavior against
+the real KSP and its ACLs is covered by this module only through fakes, not
+live tests. The absence of `ErrCleanupFailed` is therefore not an absolute
+guarantee that no key persists. After any `LoadOrCreate` failure, verify whether
+the named key exists before retrying, and clean it up in a controlled way if it
+does.
 
 CNG v0.2.x also offers per-key access policies and service-SID access
 (`OpenWithPolicy`, `LoadOrCreateWithPolicy`, `ApplyPolicy`, `OpenForService`,
@@ -105,7 +118,7 @@ bound its lifetime; long-running consumers should account for the limitation.
 
 ## DACL boundary
 
-CNG v0.2.1, with its default policy (unchanged from v0.1.2), requests
+CNG v0.2.2, with its default policy (unchanged from v0.1.2), requests
 SYSTEM/Administrators full access and LOCAL SERVICE read/execute access when
 provisioning. The software KSP may canonicalize generic
 permission masks.
@@ -145,12 +158,16 @@ access controls. The output contains identity certificates and CNG references,
 not CNG key bytes.
 
 When `LoadOrCreate` fails with `windowscng.ErrCleanupFailed`, the enrollment
-example returns a fixed message stating that creation or validation failed and
-that the newly created key may still be persisted and needs verification and
+example returns a fixed message stating that a step after creating a new key
+failed (for example finalization, validation or signer setup, including
+public-key export) and that the newly created key may still be persisted and
+needs verification and
 controlled manual cleanup. It carries no native message, key name, token or
 path, and does not retain the native error chain. Every other `LoadOrCreate`
-failure stays a generic `diagnostic.Safe` error; as described under Key custody
-and lifecycle, such a generic failure does not prove that no key was persisted.
+failure stays a generic `diagnostic.Safe` error. That includes a failure whose
+best-effort rollback deleted the newly created key. As described under Key
+custody and lifecycle, such a generic failure does not prove absolutely that no
+key was persisted.
 
 BuildFlags is an SDK integration primitive: direct callers receive flags carrying
 the JWT/claims and bypass Enroll's safe error boundary. Do not log those flags or
@@ -168,7 +185,25 @@ expected dispatch/platform errors, token-source handling, error redaction
 mapping and its `CertMatchesSigner` redaction, using synthetic errors),
 rejection of private-key output, and configuration serialization/no-overwrite.
 They use synthetic identity/token material, never create or delete CNG keys,
-and need no live Controller.
+and need no live Controller. On Windows, a few of them (missing-key mapping,
+dispatch to the engine, the reference-delimiter regression) open the software
+KSP and look up key names that do not exist.
+
+Consumer tests also replace the `windowscng.Open`/`LoadOrCreate` calls with
+in-memory fake signers. These calls go through unexported package variables
+that only tests reassign, and the tests run serially. The tests check that:
+- `Open` errors reach `identity.LoadKey` and `CertMatchesSigner` with
+  `errors.Is` preserved and no signer returned;
+- invalid names and references fail before `Open`/`LoadOrCreate`;
+- every signer opened by `CertMatchesSigner` is closed exactly once, and Close
+  failures are redacted;
+- in the enrollment example, a v0.2.2-shaped `ErrCleanupFailed` maps to the
+  fixed cleanup message and a rollback that succeeded stays generic, while the
+  reserved output is removed and the setup signer is closed once.
+
+These tests reproduce the documented error shapes of CNG v0.2.2. They do not
+exercise the real KSP, its rollback or its export guard, and they do not observe
+the Close-before-enrollment order, which the code fixes.
 
 A successful sign/verify test establishes that the tested signature verifies
 against the returned public key. A type assertion rejecting *ecdsa.PrivateKey
@@ -179,7 +214,7 @@ require separate controlled integration validation.
 
 ### Tagged fixture tests
 
-The pinned CNG v0.2.1 API used here (Open/LoadOrCreate/Delete) exposes no atomic
+The pinned CNG v0.2.2 API used here (Open/LoadOrCreate/Delete) exposes no atomic
 create-exclusive operation or created-by-this-call result. A random name plus an absence check
 does not establish deletion ownership. Therefore tagged tests **never create or
 delete persisted keys**. They own only the handles they open; cleanup errors fail.
@@ -193,7 +228,7 @@ Never use production keys. The former CNG_KEY_NAME/default shared fixture is
 replaced by explicit CNG_TEST_KEY_NAME.
 
 ```powershell
-# Choose a unique name, then provision it separately with keppin-oss/cng v0.2.1.
+# Choose a unique name, then provision it separately with keppin-oss/cng v0.2.2.
 $env:CNG_TEST_KEY_NAME = "OpenZitiCNG.Test." + [guid]::NewGuid().ToString("N")
 # After provisioning:
 go test -buildvcs=false -tags cng_smoke ./cngengine -run TestIdentityLoadKeySignVerify -count=1
