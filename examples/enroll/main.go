@@ -50,8 +50,9 @@ var errKeyMayPersist = errors.New("load or create CNG key: a step after creating
 // loadOrCreateError maps a windowscng.LoadOrCreate failure to a safe error.
 // windowscng.ErrCleanupFailed gets a specific message because the operator
 // must act on a possibly persisted key; every other failure stays generic.
-// isCleanupFailed is the platform adapter: windowscng.ErrCleanupFailed is
-// declared only on Windows (loadorcreate_windows.go / loadorcreate_other.go).
+// isCleanupFailed is the platform adapter (loadorcreate_windows.go /
+// loadorcreate_other.go). Since CNG v0.3.0 windowscng.ErrCleanupFailed is
+// declared on every platform, but only Windows can return it.
 func loadOrCreateError(err error) error {
 	if isCleanupFailed(err) {
 		return errKeyMayPersist
