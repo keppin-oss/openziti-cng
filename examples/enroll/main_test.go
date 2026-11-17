@@ -61,7 +61,8 @@ func TestCleanupErrorMessageIsSpecificAndSafe(t *testing.T) {
 }
 
 // errSyntheticSentinel stands in for windowscng.ErrKeyNotFound, which is
-// declared only on Windows; the redaction must not depend on the platform.
+// declared on every platform since CNG v0.3.0 but returned only on Windows; the
+// redaction must not depend on the platform.
 var errSyntheticSentinel = errors.New("windowscng: persisted CNG key not found or not accessible")
 
 // TestCertMatchErrorRedactsHelperFailure exercises certMatchError, the
