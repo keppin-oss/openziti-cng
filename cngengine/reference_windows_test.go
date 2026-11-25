@@ -12,9 +12,10 @@ import (
 // the address on '?'. A CNG reference without a '?' therefore panics before it
 // reaches any engine.
 //
-// The canonical reference format is therefore "cng:<container-name>?" (a
-// trailing '?' with an empty query). This test locks in that requirement so a
-// future identity upgrade that fixes the parseAddr panic is detected.
+// Every canonical reference therefore carries a '?': it introduces the
+// mandatory policy query ("cng:<container-name>?policy=..."). This test locks
+// in the parser behavior so a future identity upgrade that changes it is
+// detected.
 func TestReferenceRequiresQueryDelimiter(t *testing.T) {
 	t.Run("missing question mark panics", func(t *testing.T) {
 		defer func() {
@@ -25,12 +26,12 @@ func TestReferenceRequiresQueryDelimiter(t *testing.T) {
 		_, _ = loadKeyForTest(t, "cng:keppin-oz-noquery")
 	})
 
-	t.Run("trailing question mark does not panic", func(t *testing.T) {
+	t.Run("canonical policy query does not panic", func(t *testing.T) {
 		defer func() {
 			if r := recover(); r != nil {
 				t.Fatalf("canonical reference must not panic, got: %v", r)
 			}
 		}()
-		_, _ = loadKeyForTest(t, "cng:keppin-oz-noquery?")
+		_, _ = loadKeyForTest(t, "cng:keppin-oz-noquery?policy=service-signer")
 	})
 }

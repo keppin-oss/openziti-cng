@@ -40,7 +40,7 @@ func TestEngineListed(t *testing.T) {
 // supported". The key does not exist, so a concrete error is expected; the
 // point is the shape of that error proves the dispatch path.
 func TestLoadKeyDispatchesToCNG(t *testing.T) {
-	_, err := loadKeyForTest(t, "cng:keppin-oz-does-not-exist?")
+	_, err := loadKeyForTest(t, "cng:keppin-oz-does-not-exist?policy=service-signer")
 	if err == nil {
 		t.Fatal("identity.LoadKey must fail for a missing CNG key")
 	}
@@ -53,7 +53,7 @@ func TestLoadKeyDispatchesToCNG(t *testing.T) {
 // without a PEM-decoding or file-reading error.
 func TestLoadKeyNoPEMOrFileFallback(t *testing.T) {
 	pemLike := "-----BEGIN EC PRIVATE KEY-----"
-	_, err := loadKeyForTest(t, "cng:"+pemLike+"?")
+	_, err := loadKeyForTest(t, "cng:"+pemLike+"?policy=service-signer")
 	if err == nil {
 		t.Fatal("expected an error for a PEM-like CNG reference")
 	}

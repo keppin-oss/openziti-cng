@@ -43,14 +43,31 @@ func assertCleanupError(t *testing.T, err error) {
 	assertNoSensitive(t, err)
 }
 
+// assertKeyExistsError checks the specific key-exists error: the existing key
+// was not opened or adopted, and the operator must choose a new name or remove
+// it through a controlled lifecycle operation. No native details.
+func assertKeyExistsError(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, errKeyExists) {
+		t.Fatalf("expected the specific key-exists error, got: %v", err)
+	}
+	if errors.Is(err, errKeyMayPersist) {
+		t.Fatalf("key-exists failure mapped to the cleanup error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "already exists") || !strings.Contains(err.Error(), "not opened, adopted or modified") {
+		t.Fatalf("specific error does not explain the refused name: %v", err)
+	}
+	assertNoSensitive(t, err)
+}
+
 // assertGenericError checks the generic diagnostic.Safe error used for every
-// LoadOrCreate failure other than a failed cleanup.
+// Create failure other than a failed cleanup or a name already in use.
 func assertGenericError(t *testing.T, err error) {
 	t.Helper()
-	if errors.Is(err, errKeyMayPersist) {
-		t.Fatalf("non-cleanup failure mapped to the cleanup error: %v", err)
+	if errors.Is(err, errKeyMayPersist) || errors.Is(err, errKeyExists) {
+		t.Fatalf("generic failure mapped to a specific error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "load or create CNG key") || !strings.Contains(err.Error(), "sensitive details withheld") {
+	if !strings.Contains(err.Error(), "create CNG key") || !strings.Contains(err.Error(), "sensitive details withheld") {
 		t.Fatalf("generic safe error expected, got: %v", err)
 	}
 	assertNoSensitive(t, err)
@@ -58,6 +75,45 @@ func assertGenericError(t *testing.T, err error) {
 
 func TestCleanupErrorMessageIsSpecificAndSafe(t *testing.T) {
 	assertCleanupError(t, errKeyMayPersist)
+}
+
+func TestKeyExistsErrorMessageIsSpecificAndSafe(t *testing.T) {
+	assertKeyExistsError(t, errKeyExists)
+}
+
+// TestPostCreateSignalsAreNeutralAndSafe documents the operator contract after
+// a successful Create: the key is persisted and a retry does not resume; after
+// the enrollment, key and output are preserved and the enrollment is not
+// repeated. Neither signal advises removing anything: the OTT may be consumed.
+func TestPostCreateSignalsAreNeutralAndSafe(t *testing.T) {
+	for sig, wants := range map[error][]string{
+		errKeyPersisted:     {"remains persisted", "never deletes", "already exists", "does not resume"},
+		errEnrolledPreserve: {"OTT was consumed", "preserve the CNG key and the configuration output", "do not repeat the enrollment"},
+	} {
+		msg := sig.Error()
+		for _, want := range wants {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("message %q does not say %q", msg, want)
+			}
+		}
+		if strings.Contains(strings.ToLower(msg), "remove") {
+			t.Fatalf("message %q advises removing something", msg)
+		}
+		assertNoSensitive(t, sig)
+	}
+}
+
+func TestPostCreateErrorJoinsOnlyTheApplicableSignals(t *testing.T) {
+	if postCreateError(nil, true, true) != nil {
+		t.Fatal("no failure must stay nil")
+	}
+	base := errors.New("stage failed")
+	for _, c := range []struct{ created, enrolled bool }{{false, false}, {true, false}, {true, true}} {
+		err := postCreateError(base, c.created, c.enrolled)
+		if !errors.Is(err, base) || errors.Is(err, errKeyPersisted) != c.created || errors.Is(err, errEnrolledPreserve) != c.enrolled {
+			t.Fatalf("created=%v enrolled=%v: %v", c.created, c.enrolled, err)
+		}
+	}
 }
 
 // errSyntheticSentinel stands in for windowscng.ErrKeyNotFound, which is
@@ -97,9 +153,9 @@ func TestCertMatchErrorRedactsHelperFailure(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreateErrorOtherFailuresStayGeneric(t *testing.T) {
+func TestCreateErrorOtherFailuresStayGeneric(t *testing.T) {
 	native := syntheticNative()
-	err := loadOrCreateError(native)
+	err := createError(native)
 	assertGenericError(t, err)
 	if errors.Is(err, native) {
 		t.Fatal("native error chain must not be retained")
@@ -112,7 +168,7 @@ func TestConfigurationPersistenceAndNoOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &ziti.Config{ZtAPI: "https://controller", ID: identity.Config{Key: "cng:Test_001?", Cert: "pem:CERT", CA: "pem:CA"}}
+	cfg := &ziti.Config{ZtAPI: "https://controller", ID: identity.Config{Key: "cng:Test_001?policy=service-signer", Cert: "pem:CERT", CA: "pem:CA"}}
 	if err := writeConfig(f, cfg, cfg.ID.Key); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +195,7 @@ func TestRejectUnexpectedEnrollmentKey(t *testing.T) {
 	}
 	defer f.Close()
 	cfg := &ziti.Config{ID: identity.Config{Key: "pem:SECRET", Cert: "pem:CERT"}}
-	if err := writeConfig(f, cfg, "cng:Test?"); err == nil {
+	if err := writeConfig(f, cfg, "cng:Test?policy=service-signer"); err == nil {
 		t.Fatal("non-CNG result accepted")
 	}
 	data, err := os.ReadFile(path)
