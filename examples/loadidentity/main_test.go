@@ -10,7 +10,7 @@ import (
 )
 
 func TestRejectPrivateOrNoncanonicalKeyWithoutOutput(t *testing.T) {
-	for _, ref := range []string{"pem:-----BEGIN PRIVATE KEY----- SECRET", "file:SECRET", "cng:name", "cng:name?token=SECRET", "cng://SECRET?"} {
+	for _, ref := range []string{"pem:-----BEGIN PRIVATE KEY----- SECRET", "file:SECRET", "cng:name", "cng:name?", "cng:name?token=SECRET", "cng:name?policy=service-signer&token=SECRET", "cng:name?policy=unknown", "cng://SECRET?policy=service-signer"} {
 		path := filepath.Join(t.TempDir(), "identity.json")
 		data, _ := json.Marshal(map[string]any{"id": map[string]string{"key": ref}})
 		if err := os.WriteFile(path, data, 0600); err != nil {

@@ -16,7 +16,9 @@ import (
 )
 
 // TestIdentityLoadKeySignVerify uses an operator-provisioned, dedicated fixture.
-// It never creates or deletes persisted keys.
+// It never creates or deletes persisted keys. The fixture's policy is required
+// (CNG_TEST_KEY_POLICY, and CNG_TEST_KEY_SERVICE for the service policy): there
+// is no default.
 func TestIdentityLoadKeySignVerify(t *testing.T) {
 	name := os.Getenv("CNG_TEST_KEY_NAME")
 	if name == "" {
@@ -26,7 +28,11 @@ func TestIdentityLoadKeySignVerify(t *testing.T) {
 	if !strings.HasPrefix(name, "OpenZitiCNG.Test.") {
 		t.Fatal("CNG_TEST_KEY_NAME must start with OpenZitiCNG.Test.")
 	}
-	ref, err := keyref.Format(name)
+	policy, err := keyref.NewPolicy(os.Getenv("CNG_TEST_KEY_POLICY"), os.Getenv("CNG_TEST_KEY_SERVICE"))
+	if err != nil {
+		t.Fatalf("CNG_TEST_KEY_POLICY / CNG_TEST_KEY_SERVICE: %v", err)
+	}
+	ref, err := keyref.Format(name, policy)
 	if err != nil {
 		t.Fatal(err)
 	}

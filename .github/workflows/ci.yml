@@ -1,0 +1,85 @@
+name: ci
+
+# Default (synthetic) test suite. It creates no CNG keys and needs no Controller.
+# On Windows three tests open the software KSP read-only to look up key names
+# that do not exist; the Windows runner has an elevated token, so the verbose
+# log must show them as PASS. The fixture tests behind the cng_smoke and
+# cng_enroll build tags need an operator-provisioned key (and, for cng_enroll, a
+# live Controller): CI only vets them, it never runs them.
+#
+# The jobs run only in repositories owned by keppin-oss. In a copy owned by
+# anyone else they are skipped.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.repository_owner == 'keppin-oss'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: go version
+        run: go version
+      - name: build
+        run: go build ./...
+      - name: vet (amd64)
+        run: go vet ./...
+      - name: vet (386)
+        run: GOARCH=386 go vet ./...
+      - name: vet fixture test tags (compile only, not run)
+        run: |
+          go vet -tags cng_smoke ./...
+          go vet -tags cng_enroll ./...
+          go vet -tags "cng_smoke cng_enroll" ./...
+      - name: test
+        # Verbose, so the log names each test as PASS or SKIP.
+        run: go test ./... -count=1 -v
+
+  linux:
+    if: github.repository_owner == 'keppin-oss'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: go version
+        run: go version
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt reports:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./... -count=1
